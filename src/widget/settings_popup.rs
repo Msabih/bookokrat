@@ -27,7 +27,28 @@ pub enum SettingsAction {
     EpubImageSizeChanged,
     TestLookupCommand,
     TestSynctexEditor,
+    TestVoice,
 }
+
+/// Voice-note fields on the Integrations tab, in display order:
+/// (title, placeholder).
+const VOICE_FIELDS: [(&str, &str); 6] = [
+    (
+        "Endpoint",
+        "https://api.openai.com/v1 · Groq: https://api.groq.com/openai/v1 · local: http://127.0.0.1:8178/v1",
+    ),
+    (
+        "Model",
+        "gpt-transcribe · gpt-4o-mini-transcribe · whisper-1 · whisper-large-v3-turbo (Groq)",
+    ),
+    ("Language", "auto · e.g. ur  or  en,ur"),
+    ("Prompt", "names and terms that help recognition"),
+    ("API key", "empty = OPENAI_API_KEY (GROQ_API_KEY for Groq)"),
+    (
+        "Recorder",
+        "auto · pw-record · arecord · sox · ffmpeg · a command writing {file}",
+    ),
+];
 
 const TRUECOLOR_NOTE_LINES: u16 = 4;
 const TRUECOLOR_NOTE_SPACER_LINES: u16 = 1;
@@ -78,6 +99,9 @@ enum IntegrationsFocus {
     TestLookup,
     SynctexEditor,
     TestSynctex,
+    /// Index into `VOICE_FIELDS`.
+    Voice(usize),
+    TestVoice,
 }
 
 impl IntegrationsFocus {
@@ -88,21 +112,30 @@ impl IntegrationsFocus {
             Self::DisplayFireAndForget => Self::TestLookup,
             Self::TestLookup => Self::SynctexEditor,
             Self::SynctexEditor => Self::TestSynctex,
-            Self::TestSynctex => Self::LookupCommand,
+            Self::TestSynctex => Self::Voice(0),
+            Self::Voice(i) if i + 1 < VOICE_FIELDS.len() => Self::Voice(i + 1),
+            Self::Voice(_) => Self::TestVoice,
+            Self::TestVoice => Self::LookupCommand,
         }
     }
     fn prev(self) -> Self {
         match self {
-            Self::LookupCommand => Self::TestSynctex,
+            Self::LookupCommand => Self::TestVoice,
             Self::DisplayPopup => Self::LookupCommand,
             Self::DisplayFireAndForget => Self::DisplayPopup,
             Self::TestLookup => Self::DisplayFireAndForget,
             Self::SynctexEditor => Self::TestLookup,
             Self::TestSynctex => Self::SynctexEditor,
+            Self::Voice(0) => Self::TestSynctex,
+            Self::Voice(i) => Self::Voice(i - 1),
+            Self::TestVoice => Self::Voice(VOICE_FIELDS.len() - 1),
         }
     }
     fn is_text_input(self) -> bool {
-        matches!(self, Self::LookupCommand | Self::SynctexEditor)
+        matches!(
+            self,
+            Self::LookupCommand | Self::SynctexEditor | Self::Voice(_)
+        )
     }
 }
 
@@ -213,6 +246,7 @@ pub struct SettingsPopup {
     lookup_command_input: crate::vendored::tui_textarea::TextArea<'static>,
     lookup_display_selected: LookupDisplay,
     synctex_editor_input: crate::vendored::tui_textarea::TextArea<'static>,
+    voice_inputs: Vec<crate::vendored::tui_textarea::TextArea<'static>>,
     // Click targets: stored during render for mouse hit-testing.
     // content_chunks are stored in virtual buffer coords (origin at content_buf_origin),
     // since content is rendered to an off-screen buffer when it overflows the viewport.
@@ -273,6 +307,32 @@ impl SettingsPopup {
             synctex_editor_input.insert_str(cmd);
         }
 
+        let voice_values = [
+            snapshot.transcribe_endpoint.as_ref(),
+            snapshot.transcribe_model.as_ref(),
+            snapshot.transcribe_language.as_ref(),
+            snapshot.transcribe_prompt.as_ref(),
+            snapshot.transcribe_api_key.as_ref(),
+            snapshot.voice_recorder.as_ref(),
+        ];
+        let voice_inputs = VOICE_FIELDS
+            .iter()
+            .zip(voice_values)
+            .enumerate()
+            .map(|(i, ((_, placeholder), value))| {
+                let mut input = crate::vendored::tui_textarea::TextArea::default();
+                input.set_placeholder_text(*placeholder);
+                input.set_cursor_line_style(Style::default());
+                if i == 4 {
+                    input.set_mask_char('•');
+                }
+                if let Some(value) = value {
+                    input.insert_str(value);
+                }
+                input
+            })
+            .collect();
+
         SettingsPopup {
             settings,
             current_tab,
@@ -289,6 +349,7 @@ impl SettingsPopup {
             lookup_command_input,
             lookup_display_selected: snapshot.lookup_display,
             synctex_editor_input,
+            voice_inputs,
             tab_area: None,
             content_chunks: Vec::new(),
             content_buf_origin: (0, 0),
@@ -527,8 +588,9 @@ impl SettingsPopup {
                 self.theme_names.len() as u16 + 1 + 1 + 1 + 2 + truecolor_note_height
             }
             SettingsTab::Integrations => {
-                // 1+3+3+1+1+1+1+1+1+1+3+9+1+1 = 28
-                28
+                // lookup + synctex: 1+3+3+1+1+1+1+1+1+1+3+9+1+1 = 28
+                // voice: spacing + header + 6 inputs + hints + spacing + button
+                28 + 1 + 1 + 3 * VOICE_FIELDS.len() as u16 + 3 + 1 + 1
             }
         }
     }
@@ -560,6 +622,8 @@ impl SettingsPopup {
                     IntegrationsFocus::TestLookup => 7,
                     IntegrationsFocus::SynctexEditor => 10,
                     IntegrationsFocus::TestSynctex => 13,
+                    IntegrationsFocus::Voice(i) => 16 + i,
+                    IntegrationsFocus::TestVoice => 16 + VOICE_FIELDS.len() + 2,
                 };
                 let r = self.content_chunks.get(chunk_idx)?;
                 Some((r.y, r.height))
@@ -1492,7 +1556,18 @@ impl SettingsPopup {
                 Constraint::Length(9), // 11: SyncTeX hints
                 Constraint::Length(1), // 12: spacing
                 Constraint::Length(1), // 13: Test synctex button
-                Constraint::Min(0),    // 14: padding
+                Constraint::Length(1), // 14: spacing
+                Constraint::Length(1), // 15: Voice header
+                Constraint::Length(3), // 16..21: voice inputs
+                Constraint::Length(3),
+                Constraint::Length(3),
+                Constraint::Length(3),
+                Constraint::Length(3),
+                Constraint::Length(3),
+                Constraint::Length(3), // 22: voice hints
+                Constraint::Length(1), // 23: spacing
+                Constraint::Length(1), // 24: Test voice button
+                Constraint::Min(0),    // 25: padding
             ])
             .split(area);
 
@@ -1641,6 +1716,58 @@ impl SettingsPopup {
             self.integrations_focus == IntegrationsFocus::TestSynctex,
             palette,
         );
+
+        // -- Voice notes section --
+        self.render_section_header(
+            buf,
+            chunks[15],
+            "Voice notes (A on a selection · Ctrl+t in a comment)",
+            palette,
+            palette.base_06,
+        );
+        for (i, (title, _)) in VOICE_FIELDS.iter().enumerate() {
+            let focused = self.integrations_focus == IntegrationsFocus::Voice(i);
+            let border = if focused {
+                palette.base_0d
+            } else {
+                palette.base_02
+            };
+            let input = &mut self.voice_inputs[i];
+            input.set_block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(border))
+                    .title(Span::styled(
+                        format!(" {title} "),
+                        Style::default().fg(palette.base_04),
+                    )),
+            );
+            input.set_style(Style::default().fg(palette.base_05));
+            Widget::render(&*input, chunks[16 + i], buf);
+        }
+        let voice_hints = vec![
+            Line::from(Span::styled(
+                "  Any OpenAI-compatible endpoint; empty fields use the defaults.",
+                hint_style,
+            )),
+            Line::from(Span::styled(
+                "  Turbo: Groq endpoint + whisper-large-v3-turbo, or a local server.",
+                hint_style,
+            )),
+            Line::from(Span::styled(
+                "  Recording: Ctrl+t stops and transcribes, Esc cancels.",
+                hint_style,
+            )),
+        ];
+        Paragraph::new(voice_hints).render(chunks[22], buf);
+        self.render_test_button(
+            buf,
+            chunks[24],
+            "Test",
+            "check the key and model with the endpoint",
+            self.integrations_focus == IntegrationsFocus::TestVoice,
+            palette,
+        );
     }
 
     fn render_test_button(
@@ -1700,6 +1827,10 @@ impl SettingsPopup {
             IntegrationsFocus::TestSynctex => {
                 self.save_integrations();
                 Some(SettingsAction::TestSynctexEditor)
+            }
+            IntegrationsFocus::TestVoice => {
+                self.save_integrations();
+                Some(SettingsAction::TestVoice)
             }
             _ => None,
         }
@@ -1825,6 +1956,11 @@ impl SettingsPopup {
                 } else if hit(13) {
                     self.integrations_focus = IntegrationsFocus::TestSynctex;
                     return self.apply_integrations_selected();
+                } else if let Some(i) = (0..VOICE_FIELDS.len()).find(|i| hit(16 + i)) {
+                    self.integrations_focus = IntegrationsFocus::Voice(i);
+                } else if hit(16 + VOICE_FIELDS.len() + 2) {
+                    self.integrations_focus = IntegrationsFocus::TestVoice;
+                    return self.apply_integrations_selected();
                 }
             }
         }
@@ -1863,10 +1999,25 @@ impl SettingsPopup {
         } else {
             Some(synctex_text)
         };
+        let voice: Vec<Option<String>> = self
+            .voice_inputs
+            .iter()
+            .map(|input| {
+                let text = input.lines().first().cloned().unwrap_or_default();
+                let text = text.trim();
+                (!text.is_empty()).then(|| text.to_string())
+            })
+            .collect();
         self.settings.update(|settings| {
             settings.lookup_command = lookup_cmd;
             settings.lookup_display = self.lookup_display_selected;
             settings.synctex_editor = synctex_cmd;
+            settings.transcribe_endpoint = voice[0].clone();
+            settings.transcribe_model = voice[1].clone();
+            settings.transcribe_language = voice[2].clone();
+            settings.transcribe_prompt = voice[3].clone();
+            settings.transcribe_api_key = voice[4].clone();
+            settings.voice_recorder = voice[5].clone();
         });
     }
 
@@ -1915,6 +2066,9 @@ impl SettingsPopup {
                             }
                             IntegrationsFocus::SynctexEditor => {
                                 self.synctex_editor_input.input(input);
+                            }
+                            IntegrationsFocus::Voice(i) => {
+                                self.voice_inputs[i].input(input);
                             }
                             _ => {}
                         }
@@ -2133,7 +2287,7 @@ impl VimNavMotions for SettingsPopup {
                 self.theme_selected_idx = self.theme_max_idx();
             }
             SettingsTab::Integrations => {
-                self.integrations_focus = IntegrationsFocus::TestSynctex;
+                self.integrations_focus = IntegrationsFocus::TestVoice;
             }
         }
     }

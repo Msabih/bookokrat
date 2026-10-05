@@ -338,6 +338,9 @@ pub struct App {
     #[cfg(feature = "pdf")]
     pending_synctex_forward: Option<PendingSyncTexForward>,
     pending_mark_op: Option<PendingMarkOp>,
+    /// Voice notes: microphone recording + transcription into comments.
+    dictation: crate::voice::Dictation,
+    voice_test_rx: Option<std::sync::mpsc::Receiver<Result<String, String>>>,
     global_marks: crate::marks::GlobalMarks,
     last_terminal_title: Option<String>,
 }
@@ -572,6 +575,220 @@ impl App {
         self.notifications.show_error(message);
     }
 
+    // ---- Voice notes (src/voice) -------------------------------------------
+
+    fn voice_config(&self) -> crate::voice::VoiceConfig {
+        let settings = self.settings.load();
+        crate::voice::VoiceConfig::resolve(&settings, &|k| std::env::var(k).ok())
+    }
+
+    fn reader_key_context(&self) -> crate::keybindings::context::KeyContext {
+        #[cfg(feature = "pdf")]
+        if self.pdf_reader.is_some() {
+            return crate::keybindings::context::KeyContext::PdfStandard;
+        }
+        crate::keybindings::context::KeyContext::EpubContent
+    }
+
+    fn key_triggers(
+        &self,
+        key: &crossterm::event::KeyEvent,
+        action: crate::keybindings::action::Action,
+    ) -> bool {
+        use crate::keybindings::keymap::LookupResult;
+        let km = crate::keybindings::keymap();
+        let input = crate::keybindings::notation::key_event_to_input(key);
+        matches!(km.lookup(self.reader_key_context(), &[input]), LookupResult::Found(a) if a == action)
+    }
+
+    fn dictation_target_active(&self) -> bool {
+        #[cfg(feature = "pdf")]
+        if let Some(reader) = self.pdf_reader.as_ref() {
+            return reader.comment_input.is_active() && !reader.comment_input.read_only;
+        }
+        self.text_reader.is_comment_input_active()
+    }
+
+    /// While recording, the dictation key stops (and transcribes) and Esc
+    /// cancels; in a comment input, the dictation key starts recording.
+    /// Returns true when the key was consumed.
+    fn handle_dictation_key(&mut self, key: &crossterm::event::KeyEvent) -> bool {
+        use crate::keybindings::action::Action;
+        if self.dictation.is_active() {
+            if key.code == crossterm::event::KeyCode::Esc {
+                self.dictation.cancel();
+                self.show_voice_hud("Voice note cancelled".to_string());
+                return true;
+            }
+            if self.key_triggers(key, Action::ToggleDictation) {
+                if self.dictation.is_recording() {
+                    self.dictation.stop();
+                    self.refresh_dictation_hud();
+                }
+                return true;
+            }
+            return false;
+        }
+        if self.dictation_target_active() && self.key_triggers(key, Action::ToggleDictation) {
+            self.start_dictation();
+            return true;
+        }
+        false
+    }
+
+    fn start_dictation(&mut self) {
+        match self.dictation.start(self.voice_config()) {
+            Ok(()) => self.refresh_dictation_hud(),
+            Err(e) => self.show_voice_error(e),
+        }
+    }
+
+    fn dictate_epub_comment(&mut self) {
+        if (self.text_reader.has_text_selection() || self.text_reader.is_visual_mode_active())
+            && self.text_reader.start_comment_input()
+        {
+            self.start_dictation();
+        } else {
+            self.show_voice_hud("Select text first, then dictate a note on it".to_string());
+        }
+    }
+
+    #[cfg(feature = "pdf")]
+    fn take_pdf_dictation_request(&mut self) {
+        let requested = self
+            .pdf_reader
+            .as_mut()
+            .is_some_and(|r| std::mem::take(&mut r.dictation_requested));
+        if requested {
+            self.start_dictation();
+        }
+    }
+
+    /// From the UI tick: keep the status HUD current and deliver finished
+    /// transcriptions. Returns true when a redraw is needed.
+    fn poll_dictation(&mut self) -> bool {
+        use crate::voice::DictationEvent;
+        let tested = self.poll_voice_test();
+        let event = self.dictation.poll();
+        let had_event = event.is_some();
+        match event {
+            Some(DictationEvent::Text(text)) => self.deliver_dictation(text),
+            Some(DictationEvent::Error(e)) => self.show_voice_error(e),
+            Some(DictationEvent::Cancelled) | None => {}
+        }
+        if self.dictation.is_active() {
+            self.refresh_dictation_hud();
+            return true;
+        }
+        had_event || tested
+    }
+
+    /// Settings "Test": is the key accepted and the model available?
+    fn test_voice_settings(&mut self) {
+        use crate::voice::transcriber::Transcriber;
+        let config = self.voice_config();
+        if config.needs_key() && config.api_key.is_none() {
+            self.show_error("No API key: fill in the API key field or set OPENAI_API_KEY");
+            return;
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.voice_test_rx = Some(rx);
+        self.show_info(format!(
+            "Checking {} with {}…",
+            config.model, config.endpoint
+        ));
+        let spawned = std::thread::Builder::new()
+            .name("voice-test".into())
+            .spawn(move || {
+                let transcriber = crate::voice::transcriber::CurlTranscriber {
+                    transcriptions_url: config.transcriptions_url(),
+                    models_url: config.models_url(),
+                };
+                let result = tempfile::tempdir()
+                    .map_err(|e| format!("Failed to create a temp dir: {e}"))
+                    .and_then(|dir| {
+                        transcriber.verify(
+                            config.api_key.as_deref().unwrap_or(""),
+                            &config.model,
+                            dir.path(),
+                            &std::sync::atomic::AtomicBool::new(false),
+                        )
+                    })
+                    .map(|()| {
+                        format!("Voice notes ready: {} at {}", config.model, config.endpoint)
+                    });
+                let _ = tx.send(result);
+            });
+        if let Err(e) = spawned {
+            log::error!("Failed to start voice test thread: {e}");
+            self.voice_test_rx = None;
+        }
+    }
+
+    fn poll_voice_test(&mut self) -> bool {
+        let Some(rx) = self.voice_test_rx.as_ref() else {
+            return false;
+        };
+        match rx.try_recv() {
+            Ok(Ok(message)) => self.show_info(message),
+            Ok(Err(e)) => self.show_error(e),
+            Err(std::sync::mpsc::TryRecvError::Empty) => return false,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {}
+        }
+        self.voice_test_rx = None;
+        true
+    }
+
+    fn deliver_dictation(&mut self, text: String) {
+        #[cfg(feature = "pdf")]
+        let inserted = match self.pdf_reader.as_mut() {
+            Some(reader) => reader.comment_input.insert_text(&text),
+            None => self.text_reader.insert_comment_text(&text),
+        };
+        #[cfg(not(feature = "pdf"))]
+        let inserted = self.text_reader.insert_comment_text(&text);
+        if inserted {
+            self.show_voice_hud(format!("Voice note: {} chars", text.chars().count()));
+        } else if let Err(e) = crate::clipboard::copy_to_clipboard(&text) {
+            log::error!("Failed to copy transcription: {e}");
+            self.show_error(format!("Transcription (comment closed): {text}"));
+        } else {
+            self.show_info("Comment was closed: transcription copied to the clipboard");
+        }
+    }
+
+    fn refresh_dictation_hud(&mut self) {
+        let key = Self::key_for(
+            self.reader_key_context(),
+            crate::keybindings::action::Action::ToggleDictation,
+        );
+        if let Some(line) = self.dictation.status_line(&key) {
+            self.show_voice_hud(line);
+        }
+    }
+
+    fn show_voice_hud(&mut self, message: String) {
+        use crate::widget::hud_message::HudMode;
+        let ttl = std::time::Duration::from_millis(1500);
+        #[cfg(feature = "pdf")]
+        if let Some(reader) = self.pdf_reader.as_mut() {
+            reader.set_hud_message(message, HudMode::Normal, ttl);
+            return;
+        }
+        self.text_reader
+            .set_hud_message(message, HudMode::Normal, ttl);
+    }
+
+    fn show_voice_error(&mut self, message: String) {
+        log::error!("Voice note: {message}");
+        #[cfg(feature = "pdf")]
+        if let Some(reader) = self.pdf_reader.as_mut() {
+            reader.set_error_hud(message);
+            return;
+        }
+        self.show_error(message);
+    }
+
     #[cfg(any(test, feature = "test-utils"))]
     pub fn new_with_mock_system_executor(
         book_directory: Option<&str>,
@@ -800,6 +1017,8 @@ impl App {
             #[cfg(feature = "pdf")]
             pending_synctex_forward: None,
             pending_mark_op: None,
+            dictation: crate::voice::Dictation::system(),
+            voice_test_rx: None,
             global_marks: load_app_global_marks(),
             last_terminal_title: None,
         };
@@ -5492,6 +5711,9 @@ impl App {
             SettingsAction::TestSynctexEditor => {
                 self.test_synctex_editor();
             }
+            SettingsAction::TestVoice => {
+                self.test_voice_settings();
+            }
         }
     }
 
@@ -5871,6 +6093,10 @@ impl App {
                 self.open_highlight_palette();
                 true
             }
+            Action::DictateComment | Action::ToggleDictation => {
+                self.dictate_epub_comment();
+                true
+            }
             _ => false,
         }
     }
@@ -5982,6 +6208,7 @@ impl App {
                     debug!("Started comment input mode");
                 }
             }
+            Action::DictateComment | Action::ToggleDictation => self.dictate_epub_comment(),
             Action::OpenHighlightPalette => {
                 self.open_highlight_palette();
             }
@@ -6068,6 +6295,10 @@ impl App {
         self.sync_terminal_size_from_test_context();
 
         let _ = self.text_reader.dismiss_error_hud();
+
+        if self.handle_dictation_key(&key) {
+            return None;
+        }
 
         // If comment input is active, route all input to the text area
         if self.text_reader.is_comment_input_active() {
@@ -8207,6 +8438,10 @@ where
                             continue;
                         }
 
+                        if app.handle_dictation_key(key) {
+                            continue;
+                        }
+
                         // Pending mark state (after `m`/`` ` ``/`'`) consumes the next
                         // key as the mark name. Must run before global hotkeys, otherwise
                         // a Global-bound key (Ctrl+Z, ?, etc.) fires its action AND
@@ -8231,6 +8466,7 @@ where
                         }
 
                         let result = app.handle_pdf_event(&event);
+                        app.take_pdf_dictation_request();
                         if result.action == Some(AppAction::Quit) {
                             should_quit = true;
                         }
@@ -8485,6 +8721,9 @@ where
             }
             #[cfg(feature = "pdf")]
             if app.poll_synctex_commands() {
+                needs_redraw = true;
+            }
+            if app.poll_dictation() {
                 needs_redraw = true;
             }
             last_tick = std::time::Instant::now();

@@ -1120,6 +1120,9 @@ impl PdfReaderState {
                     InputResponse::handled(None)
                 }
             }
+            Action::DictateComment | Action::ToggleDictation => {
+                InputResponse::handled(self.start_dictated_comment())
+            }
             Action::OpenHighlightPalette => {
                 if self.normal_mode.is_visual_active() {
                     self.highlight_palette_active = true;
@@ -1274,6 +1277,7 @@ impl PdfReaderState {
             Action::ToggleProfiling => Some(InputAction::ToggleProfiling),
             Action::DumpDebugState => Some(InputAction::DumpDebugState),
             Action::AddComment => self.start_comment_input(),
+            Action::DictateComment | Action::ToggleDictation => self.start_dictated_comment(),
             Action::ZoomReset => self.reset_zoom_to_fit(),
             Action::ZoomFitWidth => self.reset_zoom_to_fit_width(),
             Action::ZoomEnhance => self.enhance_zoom(),
@@ -4569,6 +4573,19 @@ impl PdfReaderState {
         });
         self.comment_input.quoted_text = comment.quoted_text.clone();
         self.comment_input.read_only = true;
+    }
+
+    /// Open the comment input on the selection and ask the app to record.
+    fn start_dictated_comment(&mut self) -> Option<InputAction> {
+        if !(self.normal_mode.is_visual_active() || self.selection.has_selection()) {
+            self.set_error_hud("Select text first, then dictate a note on it".to_string());
+            return Some(InputAction::Redraw);
+        }
+        let action = self.start_comment_input();
+        if self.comment_input.is_active() {
+            self.dictation_requested = true;
+        }
+        action.or(Some(InputAction::Redraw))
     }
 
     fn start_comment_input(&mut self) -> Option<InputAction> {

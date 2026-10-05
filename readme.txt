@@ -178,6 +178,8 @@ at the bottom of this document for the syntax.
 │  Space+C       Copy TOC selection (PDF, requires TOC focus)                 │
 │  Space+z       Copy debug transcript                                        │
 │  a             Add/edit comment on selection                                │
+│  A             Add a comment by voice (records; Ctrl+t transcribes)         │
+│  Ctrl+t        In a comment: record / stop + transcribe; Esc cancels        │
 │  dd            Delete comment or highlight under cursor                     │
 │  ss            Toggle raw HTML view (EPUB/HTML only)                        │
 │  Enter         Open image popup (when cursor on image)                      │
@@ -284,6 +286,10 @@ Add notes directly to your books:
   [3] Type your note in the popup editor
   [4] Press Esc to save the comment
   [5] Press 'dd' when on a commented or highlighted passage to delete it
+  [6] Voice: 'A' on a selection records a note; Ctrl+t inside a comment
+      records too. Ctrl+t again transcribes at the cursor (Esc cancels).
+      Endpoint, model (e.g. whisper-large-v3-turbo), language and key:
+      Settings (Space+s) → Integrations → Voice notes.
 
 Code block annotations:
 
