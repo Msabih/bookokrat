@@ -204,6 +204,23 @@ impl CommentInputState {
     pub fn is_active(&self) -> bool {
         self.textarea.is_some()
     }
+
+    /// Insert dictated text at the cursor of an editable comment.
+    pub fn insert_text(&mut self, text: &str) -> bool {
+        if self.read_only {
+            return false;
+        }
+        let Some(textarea) = self.textarea.as_mut() else {
+            return false;
+        };
+        for (i, line) in text.lines().enumerate() {
+            if i > 0 {
+                textarea.insert_newline();
+            }
+            textarea.insert_str(line);
+        }
+        true
+    }
 }
 
 /// Actions returned from input handling
@@ -384,6 +401,9 @@ pub struct PdfReaderState {
     pub comment_input: CommentInputState,
     /// Floating color palette for visual-mode highlight creation.
     pub highlight_palette_active: bool,
+    /// Set when the user asked to dictate into the comment input; the app
+    /// owns the recorder and picks this up after the key is handled.
+    pub dictation_requested: bool,
     /// When set, a solid-color Kitty image is placed over this area after PDF
     /// images so active PDF modals have an opaque background. (col, row, width, height)
     pub modal_overlay_rect: Option<(u16, u16, u16, u16)>,
@@ -518,6 +538,7 @@ impl PdfReaderState {
             comments_doc_id,
             comment_input: CommentInputState::default(),
             highlight_palette_active: false,
+            dictation_requested: false,
             modal_overlay_rect: None,
             pending_screen_refresh: false,
             uses_iterm2_protocol: false,

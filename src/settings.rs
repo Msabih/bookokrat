@@ -199,6 +199,33 @@ pub struct Settings {
     /// Placeholders: {file}, {line}, {column}
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub synctex_editor: Option<String>,
+
+    /// Voice notes: OpenAI-compatible API base URL (OpenAI, Groq, a local
+    /// Whisper server …). `None` = OpenAI.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transcribe_endpoint: Option<String>,
+
+    /// Transcription model; `None` = the endpoint's default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transcribe_model: Option<String>,
+
+    /// Default spoken language hint(s), comma-separated ISO-639 codes.
+    /// `None` = auto-detect.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transcribe_language: Option<String>,
+
+    /// Vocabulary / context passed to the model (names, terms).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transcribe_prompt: Option<String>,
+
+    /// API key; `None` = the `OPENAI_API_KEY` environment variable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transcribe_api_key: Option<String>,
+
+    /// `auto`, a recorder name (pw-record, arecord, sox, ffmpeg) or a shell
+    /// command writing `{file}`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub voice_recorder: Option<String>,
 }
 
 fn default_true() -> bool {
@@ -242,6 +269,12 @@ impl Default for Settings {
             lookup_display: LookupDisplay::default(),
             nav_panel_width: None,
             synctex_editor: None,
+            transcribe_endpoint: None,
+            transcribe_model: None,
+            transcribe_language: None,
+            transcribe_prompt: None,
+            transcribe_api_key: None,
+            voice_recorder: None,
         }
     }
 }
@@ -731,7 +764,39 @@ fn app_managed_key_values(settings: &Settings) -> Vec<(String, String)> {
                 .map(|c| format!("'{}'", c.replace('\'', "''")))
                 .unwrap_or_else(|| "null".into()),
         ),
+        (
+            "transcribe_endpoint".into(),
+            yaml_opt_string(&settings.transcribe_endpoint),
+        ),
+        (
+            "transcribe_model".into(),
+            yaml_opt_string(&settings.transcribe_model),
+        ),
+        (
+            "transcribe_language".into(),
+            yaml_opt_string(&settings.transcribe_language),
+        ),
+        (
+            "transcribe_prompt".into(),
+            yaml_opt_string(&settings.transcribe_prompt),
+        ),
+        (
+            "transcribe_api_key".into(),
+            yaml_opt_string(&settings.transcribe_api_key),
+        ),
+        (
+            "voice_recorder".into(),
+            yaml_opt_string(&settings.voice_recorder),
+        ),
     ]
+}
+
+/// A single-quoted YAML scalar (quotes doubled), or `null`.
+fn yaml_opt_string(value: &Option<String>) -> String {
+    value
+        .as_ref()
+        .map(|v| format!("'{}'", v.replace('\'', "''")))
+        .unwrap_or_else(|| "null".into())
 }
 
 fn generate_settings_yaml(settings: &Settings) -> String {
@@ -802,6 +867,8 @@ fn generate_settings_yaml(settings: &Settings) -> String {
         content.push_str(LOOKUP_COMMAND_TEMPLATE);
     }
     content.push('\n');
+    content.push_str(VOICE_NOTES_TEMPLATE);
+    content.push('\n');
 
     content.push_str(CUSTOM_THEMES_TEMPLATE);
 
@@ -862,6 +929,26 @@ const CUSTOM_THEMES_TEMPLATE: &str = r#"# ======================================
 #     base0D: "7E9CD8"    # Blue (links)
 #     base0E: "957FB8"    # Purple (keywords)
 #     base0F: "D27E99"    # Brown/Pink
+
+"#;
+
+const VOICE_NOTES_TEMPLATE: &str = r#"# ============================================================================
+# Voice notes: Ctrl+t while writing a comment records, Ctrl+t again
+# transcribes into the comment (Esc cancels); A on a selection starts a
+# comment by voice. Everything is also editable in Settings (Space+s).
+#
+# transcribe_endpoint: any OpenAI-compatible API base URL (default OpenAI)
+#   'https://api.openai.com/v1'        OpenAI
+#   'https://api.groq.com/openai/v1'   Groq (whisper-large-v3-turbo)
+#   'http://127.0.0.1:8178/v1'         a local Whisper server (no key)
+# transcribe_model: e.g. gpt-transcribe (OpenAI default), gpt-4o-transcribe,
+#   gpt-4o-mini-transcribe, whisper-1, whisper-large-v3-turbo (Groq),
+#   large-v3-turbo (local servers)
+# transcribe_language: default spoken language(s), e.g. 'ur' or 'en,ur';
+#   null = auto-detect
+# transcribe_prompt: names/terms that help recognition, e.g. 'Ibn Taymiyya, tafwid'
+# transcribe_api_key: the key; null = the OPENAI_API_KEY environment variable
+# voice_recorder: auto (pw-record, arecord, sox, ffmpeg) or a command writing {file}
 
 "#;
 

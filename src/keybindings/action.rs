@@ -72,6 +72,8 @@ pub enum Action {
     CopyTocItem,
     LookupSelection,
     FollowLink,
+    DictateComment,
+    ToggleDictation,
 
     // === Vim normal mode ===
     ToggleNormalMode,
@@ -223,6 +225,8 @@ impl Action {
         Action::CopyTocItem,
         Action::LookupSelection,
         Action::FollowLink,
+        Action::DictateComment,
+        Action::ToggleDictation,
         Action::ToggleNormalMode,
         Action::EnterVisualMode,
         Action::EnterVisualLineMode,
@@ -366,6 +370,10 @@ impl Action {
             CopyChapterText => "Copy chapter text (EPUB) / page text (PDF)",
             CopyTocItem => "Copy the selected TOC entry (PDF)",
             LookupSelection => "Run the configured lookup command on the selection",
+            DictateComment => "Add a comment on the selection by voice (starts recording)",
+            ToggleDictation => {
+                "Voice dictation: start/stop recording in the comment input (or dictate a comment on the selection)"
+            }
             FollowLink => "Follow the link under the cursor",
 
             // Vim normal mode
@@ -522,6 +530,7 @@ mod tests {
                 AddComment | OpenHighlightPalette | DeleteComment => a,
                 CopySelection | CopyChapterText | CopyTocItem => a,
                 LookupSelection | FollowLink => a,
+                DictateComment | ToggleDictation => a,
                 ToggleNormalMode | EnterVisualMode | EnterVisualLineMode | StartYank => a,
                 FindForward | FindBackward | TillForward | TillBackward | RepeatFind
                 | RepeatFindReverse => a,

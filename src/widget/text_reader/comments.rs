@@ -502,6 +502,23 @@ impl crate::markdown_text_reader::MarkdownTextReader {
     }
 
     /// Handle input events when in comment mode
+    /// Insert dictated text at the comment cursor.
+    pub fn insert_comment_text(&mut self, text: &str) -> bool {
+        if !self.comment_input.is_active() {
+            return false;
+        }
+        let Some(textarea) = self.comment_input.textarea.as_mut() else {
+            return false;
+        };
+        for (i, line) in text.lines().enumerate() {
+            if i > 0 {
+                textarea.insert_newline();
+            }
+            textarea.insert_str(line);
+        }
+        true
+    }
+
     pub fn handle_comment_input(&mut self, input: Input) -> bool {
         if !self.comment_input.is_active() {
             return false;

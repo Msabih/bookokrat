@@ -191,6 +191,8 @@ fn content_specifics(keymap: &mut Keymap) {
     bind!(ctx, "/" => Action::StartSearch);
     bind!(ctx, "n" => Action::ToggleNormalMode);
     bind!(ctx, "a" => Action::AddComment);
+    bind!(ctx, "A" => Action::DictateComment);
+    bind!(ctx, "<C-t>" => Action::ToggleDictation);
     bind!(ctx, "dd" => Action::DeleteComment);
     bind!(ctx, "c" => Action::CopySelection);
     bind!(ctx, "<C-i>" => Action::JumpForward);
@@ -217,6 +219,8 @@ fn epub_normal_specifics(keymap: &mut Keymap) {
     // `dd` deletes the comment or highlight under the cursor (or covered by
     // the visual selection). Mirrors the EpubContent binding.
     bind!(ctx, "dd" => Action::DeleteComment);
+    bind!(ctx, "A" => Action::DictateComment);
+    bind!(ctx, "<C-t>" => Action::ToggleDictation);
 }
 
 fn pdf_specifics(keymap: &mut Keymap) {
@@ -244,6 +248,8 @@ fn pdf_specifics(keymap: &mut Keymap) {
     bind!(ctx, "p" => Action::ToggleProfiling);
     bind!(ctx, "x" => Action::DumpDebugState);
     bind!(ctx, "a" => Action::AddComment);
+    bind!(ctx, "A" => Action::DictateComment);
+    bind!(ctx, "<C-t>" => Action::ToggleDictation);
     bind!(ctx, "z" => Action::ZoomReset);
     bind!(ctx, "Z" => Action::ZoomFitWidth);
     bind!(ctx, "e" => Action::ZoomEnhance);
@@ -265,6 +271,8 @@ fn pdf_normal_specifics(keymap: &mut Keymap) {
     bind!(ctx, "<C-o>" => Action::JumpBackward);
     bind!(ctx, "<C-i>" => Action::JumpForward);
     bind!(ctx, "a" => Action::AddComment);
+    bind!(ctx, "A" => Action::DictateComment);
+    bind!(ctx, "<C-t>" => Action::ToggleDictation);
     // `dd` deletes the annotation (comment or highlight) under the cursor.
     // Mirrors the EpubNormal binding.
     bind!(ctx, "dd" => Action::DeleteComment);
@@ -736,5 +744,29 @@ mod tests {
                 LookupResult::Found(Action::JumpForward)
             );
         }
+    }
+
+    #[test]
+    fn dictation_bindings_in_reader_contexts() {
+        let keymap = default_keymap();
+        for ctx in [
+            KeyContext::EpubContent,
+            KeyContext::EpubNormal,
+            KeyContext::PdfStandard,
+            KeyContext::PdfNormal,
+        ] {
+            assert_eq!(
+                lookup(&keymap, ctx, "A"),
+                LookupResult::Found(Action::DictateComment)
+            );
+            assert_eq!(
+                lookup(&keymap, ctx, "<C-t>"),
+                LookupResult::Found(Action::ToggleDictation)
+            );
+        }
+        assert_eq!(
+            lookup(&keymap, KeyContext::Global, "<C-r>"),
+            LookupResult::Found(Action::ReloadKeybindings)
+        );
     }
 }

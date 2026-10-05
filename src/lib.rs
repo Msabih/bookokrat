@@ -41,6 +41,7 @@ pub mod terminal_overlay;
 pub use components::table;
 pub mod theme;
 pub mod types;
+pub mod voice;
 
 // PDF rendering infrastructure - only available with pdf feature
 #[cfg(feature = "pdf")]
