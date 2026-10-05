@@ -3871,6 +3871,10 @@ impl App {
     }
 
     /// Calculate the navigation panel width based on stored terminal width
+    pub fn nav_panel_on_right(&self) -> bool {
+        false
+    }
+
     pub fn nav_panel_width(&self) -> u16 {
         if self.zen_mode {
             0
@@ -4858,6 +4862,32 @@ impl App {
         use crate::keybindings::action::Action;
 
         match action {
+            Action::WindowLeft | Action::WindowRight | Action::WindowNext => {
+                if self.has_active_popup() || self.zen_mode {
+                    return false;
+                }
+                let FocusedPanel::Main(current) = self.focused_panel else {
+                    return false;
+                };
+                let nav_side_is_left = !self.nav_panel_on_right();
+                let target = match action {
+                    Action::WindowLeft if nav_side_is_left => MainPanel::NavigationList,
+                    Action::WindowLeft => MainPanel::Content,
+                    Action::WindowRight if nav_side_is_left => MainPanel::Content,
+                    Action::WindowRight => MainPanel::NavigationList,
+                    _ if current == MainPanel::Content => MainPanel::NavigationList,
+                    _ => MainPanel::Content,
+                };
+                if target != current {
+                    if current == MainPanel::NavigationList {
+                        self.navigation_panel
+                            .table_of_contents
+                            .clear_manual_navigation();
+                    }
+                    self.set_main_panel_focus(target);
+                }
+                true
+            }
             Action::ToggleHelp => {
                 if let FocusedPanel::Main(panel) = self.focused_panel {
                     self.previous_main_panel = panel;

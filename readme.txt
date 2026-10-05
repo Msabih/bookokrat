@@ -71,6 +71,7 @@ at the bottom of this document for the syntax.
 │  Space+z       Toggle zen mode (configurable, see Settings)                 │
 │  Space+b       Toggle zen-mode border/frame                                 │
 │  Tab           Switch focus between library and reader                      │
+│  Ctrl+w h/l/w  Focus left / right / other panel (vim windows)               │
 │  Esc           Clear selection, exit search, dismiss popups                 │
 │  ?             Toggle this help screen                                      │
 │  Space+t       Open theme selector                                          │
@@ -105,6 +106,9 @@ at the bottom of this document for the syntax.
 │  n / N         Next / previous search match                                 │
 │  h / l         Collapse / expand TOC entry                                  │
 │  H / L         Collapse / expand all entries                                │
+│  zo/zc/za      Open / close / toggle TOC entry (vim folds)                  │
+│  zr / zm       Show one TOC level more / less                               │
+│  zR / zM       Open / close all TOC levels                                  │
 │  Enter         Open highlighted book or chapter                             │
 └─────────────────────────────────────────────────────────────────────────────┘
 

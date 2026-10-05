@@ -143,6 +143,11 @@ fn global_specifics(keymap: &mut Keymap) {
     bind!(ctx, "<C-z>" => Action::ToggleZenMode);
     bind!(ctx, "<lt>" => Action::ShrinkNavPanel);
     bind!(ctx, "<gt>" => Action::ExpandNavPanel);
+    bind!(ctx, "<C-w>h" => Action::WindowLeft);
+    bind!(ctx, "<C-w>l" => Action::WindowRight);
+    bind!(ctx, "<C-w>w" => Action::WindowNext);
+    bind!(ctx, "<C-w><C-w>" => Action::WindowNext);
+    bind!(ctx, "<C-w>p" => Action::WindowNext);
 }
 
 fn nav_specifics(keymap: &mut Keymap) {
@@ -162,6 +167,13 @@ fn nav_specifics(keymap: &mut Keymap) {
     bind!(ctx, "N" => Action::PrevSearchMatch);
     bind!(ctx, "S" => Action::ToggleSortOrder);
     bind!(ctx, "b" => Action::SwitchNavMode);
+    bind!(ctx, "zo" => Action::Expand);
+    bind!(ctx, "zc" => Action::Collapse);
+    bind!(ctx, "za" => Action::ToggleFold);
+    bind!(ctx, "zR" => Action::ExpandAll);
+    bind!(ctx, "zM" => Action::CollapseAll);
+    bind!(ctx, "zr" => Action::FoldLess);
+    bind!(ctx, "zm" => Action::FoldMore);
 }
 
 fn content_specifics(keymap: &mut Keymap) {
@@ -209,6 +221,8 @@ fn epub_normal_specifics(keymap: &mut Keymap) {
 
 fn pdf_specifics(keymap: &mut Keymap) {
     let ctx = keymap.context_mut(KeyContext::PdfStandard);
+    bind!(ctx, "<C-o>" => Action::JumpBackward);
+    bind!(ctx, "<C-i>" => Action::JumpForward);
     bind!(ctx, "j" => Action::ScrollDown);
     bind!(ctx, "J" => Action::ScrollDown);
     bind!(ctx, "<Down>" => Action::ScrollDown);
@@ -248,6 +262,8 @@ fn pdf_specifics(keymap: &mut Keymap) {
 
 fn pdf_normal_specifics(keymap: &mut Keymap) {
     let ctx = keymap.context_mut(KeyContext::PdfNormal);
+    bind!(ctx, "<C-o>" => Action::JumpBackward);
+    bind!(ctx, "<C-i>" => Action::JumpForward);
     bind!(ctx, "a" => Action::AddComment);
     // `dd` deletes the annotation (comment or highlight) under the cursor.
     // Mirrors the EpubNormal binding.
@@ -669,5 +685,56 @@ mod tests {
             lookup(&keymap, KeyContext::PopupHelp, "?"),
             LookupResult::Found(Action::Cancel)
         );
+    }
+
+    #[test]
+    fn vim_window_commands_are_global() {
+        let keymap = default_keymap();
+        for (keys, action) in [
+            ("<C-w>h", Action::WindowLeft),
+            ("<C-w>l", Action::WindowRight),
+            ("<C-w>w", Action::WindowNext),
+            ("<C-w><C-w>", Action::WindowNext),
+            ("<C-w>p", Action::WindowNext),
+        ] {
+            assert_eq!(
+                lookup(&keymap, KeyContext::Global, keys),
+                LookupResult::Found(action)
+            );
+        }
+    }
+
+    #[test]
+    fn vim_fold_commands_in_toc() {
+        let keymap = default_keymap();
+        for (keys, action) in [
+            ("zo", Action::Expand),
+            ("zc", Action::Collapse),
+            ("za", Action::ToggleFold),
+            ("zR", Action::ExpandAll),
+            ("zM", Action::CollapseAll),
+            ("zr", Action::FoldLess),
+            ("zm", Action::FoldMore),
+        ] {
+            assert_eq!(
+                lookup(&keymap, KeyContext::Navigation, keys),
+                LookupResult::Found(action)
+            );
+        }
+    }
+
+    #[test]
+    fn pdf_jump_list_goes_through_keymap() {
+        let keymap = default_keymap();
+        for ctx in [KeyContext::PdfStandard, KeyContext::PdfNormal] {
+            assert_eq!(
+                lookup(&keymap, ctx, "<C-o>"),
+                LookupResult::Found(Action::JumpBackward)
+            );
+            assert_eq!(
+                lookup(&keymap, ctx, "<C-i>"),
+                LookupResult::Found(Action::JumpForward)
+            );
+        }
     }
 }

@@ -370,6 +370,21 @@ impl NavigationPanel {
                     None
                 }
             }
+            Action::ToggleFold | Action::FoldMore | Action::FoldLess
+                if self.mode == NavigationMode::TableOfContents =>
+            {
+                let toc = &mut self.table_of_contents;
+                match action {
+                    Action::ToggleFold => toc.toggle_selected_expansion(),
+                    Action::FoldMore => {
+                        toc.fold_more();
+                    }
+                    _ => {
+                        toc.fold_less();
+                    }
+                }
+                Some(NavigationPanelAction::TocExpansionChanged)
+            }
             Action::GoTop => {
                 self.handle_gg();
                 None

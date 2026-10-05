@@ -15,6 +15,9 @@ pub enum Action {
     ForceRedraw,
     Suspend,
     SwitchFocus,
+    WindowLeft,
+    WindowRight,
+    WindowNext,
 
     // === Navigation (movement in lists/content) ===
     MoveDown,
@@ -134,6 +137,9 @@ pub enum Action {
     ExpandAll,
     Collapse,
     Expand,
+    ToggleFold,
+    FoldMore,
+    FoldLess,
     SwitchNavMode,
 
     // === History/Comments viewer ===
@@ -172,6 +178,9 @@ impl Action {
         Action::ForceRedraw,
         Action::Suspend,
         Action::SwitchFocus,
+        Action::WindowLeft,
+        Action::WindowRight,
+        Action::WindowNext,
         Action::MoveDown,
         Action::MoveUp,
         Action::MoveLeft,
@@ -267,6 +276,9 @@ impl Action {
         Action::ExpandAll,
         Action::Collapse,
         Action::Expand,
+        Action::ToggleFold,
+        Action::FoldMore,
+        Action::FoldLess,
         Action::SwitchNavMode,
         Action::DeleteEntry,
         Action::CopyEntry,
@@ -298,6 +310,9 @@ impl Action {
             ForceRedraw => "Force a full-screen redraw",
             Suspend => "Suspend the process (job control)",
             SwitchFocus => "Switch focus between nav panel and reader",
+            WindowLeft => "Focus the panel on the left (nav panel or reader)",
+            WindowRight => "Focus the panel on the right (nav panel or reader)",
+            WindowNext => "Focus the other panel (nav panel <-> reader)",
 
             // Navigation / movement
             MoveDown => "Move selection down one item",
@@ -417,6 +432,9 @@ impl Action {
             ExpandAll => "Expand all TOC entries",
             Collapse => "Collapse the current TOC entry",
             Expand => "Expand the current TOC entry",
+            ToggleFold => "Toggle the current TOC entry open/closed",
+            FoldMore => "Show one TOC level less (vim zm)",
+            FoldLess => "Show one TOC level more (vim zr)",
             SwitchNavMode => "Switch between book list and table of contents",
 
             // History / comments viewer
@@ -489,6 +507,7 @@ mod tests {
             match a {
                 Nop | Unknown => a,
                 Quit | ForceRedraw | Suspend | SwitchFocus => a,
+                WindowLeft | WindowRight | WindowNext => a,
                 MoveDown | MoveUp | MoveLeft | MoveRight => a,
                 ScrollHalfDown | ScrollHalfUp | ScrollPageDown | ScrollPageUp => a,
                 GoTop | GoBottom | Select => a,
@@ -518,6 +537,7 @@ mod tests {
                 DumpDebugState | SynctexInverse => a,
                 ScrollDown | ScrollUp => a,
                 ToggleSortOrder | CollapseAll | ExpandAll | Collapse | Expand | SwitchNavMode => a,
+                ToggleFold | FoldMore | FoldLess => a,
                 DeleteEntry | CopyEntry | ExportComments | EnterCommentNav => a,
                 Cancel | ReloadKeybindings | NextTab | PrevTab => a,
             }

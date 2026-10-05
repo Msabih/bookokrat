@@ -312,10 +312,12 @@ fn picker_protocol_for_graphics(protocol: GraphicsProtocol) -> ProtocolType {
 
 fn forced_protocol_for_kind(kind: &TerminalKind, env: &TerminalEnv) -> Option<GraphicsProtocol> {
     match kind {
-        TerminalKind::Kitty | TerminalKind::Ghostty => Some(GraphicsProtocol::Kitty),
-        TerminalKind::Konsole | TerminalKind::WezTerm | TerminalKind::Warp => {
-            Some(GraphicsProtocol::Iterm2)
+        // WezTerm implements the Kitty protocol including SHM transfer; its
+        // iTerm2 path re-encodes every page as base64 tiles and is far slower.
+        TerminalKind::Kitty | TerminalKind::Ghostty | TerminalKind::WezTerm => {
+            Some(GraphicsProtocol::Kitty)
         }
+        TerminalKind::Konsole | TerminalKind::Warp => Some(GraphicsProtocol::Iterm2),
         TerminalKind::ITerm => {
             if iterm_supports_kitty(env) {
                 Some(GraphicsProtocol::Kitty)
@@ -325,9 +327,10 @@ fn forced_protocol_for_kind(kind: &TerminalKind, env: &TerminalEnv) -> Option<Gr
         }
         TerminalKind::Other(name) => {
             let name = name.to_ascii_lowercase();
-            if name.contains("wezterm") || name.contains("konsole") || name.contains("warp") {
+            if name.contains("konsole") || name.contains("warp") {
                 Some(GraphicsProtocol::Iterm2)
-            } else if name.contains("kitty") || name.contains("ghostty") {
+            } else if name.contains("kitty") || name.contains("ghostty") || name.contains("wezterm")
+            {
                 Some(GraphicsProtocol::Kitty)
             } else if name.contains("iterm") {
                 if iterm_supports_kitty(env) {
@@ -381,10 +384,10 @@ fn supports_graphics_from_env(env: &TerminalEnv) -> bool {
 
 fn guess_protocol_from_env(env: &TerminalEnv, kind: &TerminalKind) -> Option<GraphicsProtocol> {
     match kind {
-        TerminalKind::Kitty | TerminalKind::Ghostty => Some(GraphicsProtocol::Kitty),
-        TerminalKind::Konsole | TerminalKind::WezTerm | TerminalKind::Warp => {
-            Some(GraphicsProtocol::Iterm2)
+        TerminalKind::Kitty | TerminalKind::Ghostty | TerminalKind::WezTerm => {
+            Some(GraphicsProtocol::Kitty)
         }
+        TerminalKind::Konsole | TerminalKind::Warp => Some(GraphicsProtocol::Iterm2),
         TerminalKind::ITerm => {
             if iterm_supports_kitty(env) {
                 Some(GraphicsProtocol::Kitty)

@@ -606,7 +606,14 @@ impl PdfReaderState {
         if !key.modifiers.contains(KeyModifiers::CONTROL) {
             return None;
         }
+        match key.code {
+            KeyCode::Char('o') => self.jump_list_step(true),
+            KeyCode::Char('i') => self.jump_list_step(false),
+            _ => None,
+        }
+    }
 
+    fn jump_list_step(&mut self, back: bool) -> Option<InputAction> {
         let current_scroll = self
             .zoom
             .as_ref()
@@ -618,10 +625,10 @@ impl PdfReaderState {
             current_scroll,
         ));
 
-        let location = match key.code {
-            KeyCode::Char('o') => self.jump_list.jump_back(current_location),
-            KeyCode::Char('i') => self.jump_list.jump_forward(),
-            _ => None,
+        let location = if back {
+            self.jump_list.jump_back(current_location)
+        } else {
+            self.jump_list.jump_forward()
         }?;
 
         if let JumpLocation::Pdf {
@@ -899,6 +906,8 @@ impl PdfReaderState {
             }
             Action::NextSearchMatch => InputResponse::handled(self.jump_to_next_search_match()),
             Action::PrevSearchMatch => InputResponse::handled(self.jump_to_prev_search_match()),
+            Action::JumpBackward => InputResponse::handled(self.jump_list_step(true)),
+            Action::JumpForward => InputResponse::handled(self.jump_list_step(false)),
             Action::ScrollHalfDown => {
                 InputResponse::handled(self.scroll_half_screen(ScrollDirection::Down))
             }
@@ -1249,6 +1258,8 @@ impl PdfReaderState {
                 }
             }
             Action::NextSearchMatch => self.jump_to_next_search_match(),
+            Action::JumpBackward => self.jump_list_step(true),
+            Action::JumpForward => self.jump_list_step(false),
             Action::PrevSearchMatch => self.jump_to_prev_search_match(),
             Action::ScrollDown => self.scroll_line(ScrollDirection::Down),
             Action::ScrollUp => self.scroll_line(ScrollDirection::Up),

@@ -610,6 +610,84 @@ impl TableOfContents {
         }
     }
 
+    /// vim `zm`: show one TOC level less. Returns the new fold level.
+    pub fn fold_more(&mut self) -> Option<usize> {
+        let level = self.fold_level()?;
+        self.set_fold_level(level.saturating_sub(1))
+    }
+
+    /// vim `zr`: show one TOC level more. Returns the new fold level.
+    pub fn fold_less(&mut self) -> Option<usize> {
+        let level = self.fold_level()?;
+        self.set_fold_level(level + 1)
+    }
+
+    /// The vim foldlevel of the TOC: the depth of the shallowest closed section
+    /// (every section above it is open), or one past the deepest section when
+    /// everything is open.
+    fn fold_level(&self) -> Option<usize> {
+        let items = &self.current_book_info.as_ref()?.toc_items;
+        Some(
+            Self::shallowest_closed_section(items, 0)
+                .unwrap_or_else(|| Self::section_depth_count(items, 0)),
+        )
+    }
+
+    /// Open exactly the sections shallower than `level`, close the rest.
+    fn set_fold_level(&mut self, level: usize) -> Option<usize> {
+        let info = self.current_book_info.as_mut()?;
+        let level = level.min(Self::section_depth_count(&info.toc_items, 0));
+        Self::apply_fold_level(&mut info.toc_items, 0, level);
+        self.manual_navigation = true;
+        self.manual_navigation_cooldown = 5;
+        Some(level)
+    }
+
+    fn shallowest_closed_section(items: &[TocItem], depth: usize) -> Option<usize> {
+        items
+            .iter()
+            .filter_map(|item| match item {
+                TocItem::Section {
+                    is_expanded: false,
+                    children,
+                    ..
+                } if !children.is_empty() => Some(depth),
+                TocItem::Section { children, .. } => {
+                    Self::shallowest_closed_section(children, depth + 1)
+                }
+                TocItem::Chapter { .. } => None,
+            })
+            .min()
+    }
+
+    /// Number of nesting levels that contain foldable sections.
+    fn section_depth_count(items: &[TocItem], depth: usize) -> usize {
+        items
+            .iter()
+            .map(|item| match item {
+                TocItem::Section { children, .. } if !children.is_empty() => {
+                    Self::section_depth_count(children, depth + 1).max(depth + 1)
+                }
+                _ => depth,
+            })
+            .max()
+            .unwrap_or(depth)
+    }
+
+    fn apply_fold_level(items: &mut [TocItem], depth: usize, level: usize) {
+        for item in items {
+            if let TocItem::Section {
+                is_expanded,
+                children,
+                ..
+            } = item
+            {
+                *is_expanded = depth < level;
+                Self::apply_fold_level(children, depth + 1, level);
+            }
+        }
+    }
+
     /// Collapse/fold all sections in the table of contents
     pub fn collapse_all(&mut self) {
         if let Some(ref mut current_book_info) = self.current_book_info {
