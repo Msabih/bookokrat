@@ -153,7 +153,9 @@ impl RenderService {
             parent
         };
         let target_name = doc_path.file_name()?.to_owned();
-        let last_reload = Arc::new(Mutex::new(Instant::now()));
+        let target_path = doc_path.to_path_buf();
+        let last_event = Arc::new(Mutex::new(Instant::now()));
+        let settling = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let generation = reload_generation.clone();
         let tx = request_tx.clone();
 
@@ -179,17 +181,44 @@ impl RenderService {
                 return;
             }
 
-            let mut last = last_reload.lock().unwrap_or_else(|e| e.into_inner());
-            if last.elapsed().as_millis() < 50 {
+            *last_event.lock().unwrap_or_else(|e| e.into_inner()) = Instant::now();
+            if settling.swap(true, std::sync::atomic::Ordering::AcqRel) {
                 return;
             }
-            *last = Instant::now();
 
-            generation.fetch_add(1, std::sync::atomic::Ordering::Release);
-            // Wake a worker so it detects the generation change.
-            // The worker reloads, sends Reloaded, service reschedules
-            // prefetch which wakes remaining workers.
-            let _ = tx.send(RenderRequest::Cancel(RequestId::new(0)));
+            // Writers like LaTeX rewrite the PDF in place over seconds. Reload
+            // once, after the writes have gone quiet and the file is complete,
+            // instead of on the first event (which loads a half-written file
+            // and can drop the final write).
+            let (last_event, settling, generation, tx, path) = (
+                last_event.clone(),
+                settling.clone(),
+                generation.clone(),
+                tx.clone(),
+                target_path.clone(),
+            );
+            std::thread::spawn(move || {
+                const QUIET: std::time::Duration = std::time::Duration::from_millis(150);
+                const MAX_WAIT: std::time::Duration = std::time::Duration::from_secs(60);
+                let started = Instant::now();
+                loop {
+                    std::thread::sleep(QUIET);
+                    let quiet = last_event
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .elapsed()
+                        >= QUIET;
+                    if (quiet && pdf_write_complete(&path)) || started.elapsed() >= MAX_WAIT {
+                        break;
+                    }
+                }
+                settling.store(false, std::sync::atomic::Ordering::Release);
+                generation.fetch_add(1, std::sync::atomic::Ordering::Release);
+                // Wake a worker so it detects the generation change.
+                // The worker reloads, sends Reloaded, service reschedules
+                // prefetch which wakes remaining workers.
+                let _ = tx.send(RenderRequest::Cancel(RequestId::new(0)));
+            });
         })
         .ok()?;
 
@@ -636,6 +665,28 @@ fn djvu_bookmark_target(url: &str, page_count: usize) -> TocTarget {
     TocTarget::External(trimmed.to_string())
 }
 
+/// A PDF is complete once its trailer is written: `%%EOF` within the last KiB.
+fn pdf_write_complete(path: &Path) -> bool {
+    use std::io::{Read, Seek, SeekFrom};
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return false;
+    };
+    let Ok(len) = file.metadata().map(|m| m.len()) else {
+        return false;
+    };
+    if file
+        .seek(SeekFrom::Start(len.saturating_sub(1024)))
+        .is_err()
+    {
+        return false;
+    }
+    let mut tail = Vec::with_capacity(1024);
+    if file.read_to_end(&mut tail).is_err() {
+        return false;
+    }
+    tail.windows(5).any(|w| w == b"%%EOF")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -853,5 +904,19 @@ mod tests {
             service.request_page_if_needed(0).is_some(),
             "a prefetch in flight for stale render params must not block a fresh page request"
         );
+    }
+
+    #[test]
+    fn pdf_write_complete_needs_the_trailer() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("doc.pdf");
+        std::fs::write(&path, b"%PDF-1.7\n1 0 obj\n").unwrap();
+        assert!(
+            !pdf_write_complete(&path),
+            "mid-write file must not count as complete"
+        );
+        std::fs::write(&path, b"%PDF-1.7\ntrailer\nstartxref\n9\n%%EOF\n").unwrap();
+        assert!(pdf_write_complete(&path));
+        assert!(!pdf_write_complete(&dir.path().join("missing.pdf")));
     }
 }

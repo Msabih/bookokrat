@@ -337,6 +337,11 @@ pub struct App {
     synctex_rx: Option<flume::Receiver<crate::pdf::synctex::SyncTexCommand>>,
     #[cfg(feature = "pdf")]
     pending_synctex_forward: Option<PendingSyncTexForward>,
+    /// LaTeX writes the .synctex.gz after the PDF, so a reload can find the
+    /// previous build's index. Until this deadline, reload SyncTeX as soon as
+    /// the sidecar is at least as new as the PDF.
+    #[cfg(feature = "pdf")]
+    synctex_stale_until: Option<std::time::Instant>,
     pending_mark_op: Option<PendingMarkOp>,
     global_marks: crate::marks::GlobalMarks,
     last_terminal_title: Option<String>,
@@ -799,6 +804,8 @@ impl App {
             synctex_rx: None,
             #[cfg(feature = "pdf")]
             pending_synctex_forward: None,
+            #[cfg(feature = "pdf")]
+            synctex_stale_until: None,
             pending_mark_op: None,
             global_marks: load_app_global_marks(),
             last_terminal_title: None,
@@ -1634,6 +1641,19 @@ impl App {
         self.pdf_conversion_rx = conversion_rx;
 
         self.refresh_synctex_state(&doc_path, true);
+
+        // A PDF with a SyncTeX sidecar is LaTeX output that will be rebuilt:
+        // follow it on disk without asking.
+        if self.synctex_scanner.is_some() {
+            if let (Some(service), Some(reader)) =
+                (self.pdf_service.as_mut(), self.pdf_reader.as_mut())
+            {
+                if !service.is_watching() {
+                    service.enable_watching();
+                    reader.watching = service.is_watching();
+                }
+            }
+        }
 
         // Sync initial page and scale to service so first render requests the correct page
         // at the correct zoom level. Use set_current_page_no_render to avoid triggering
@@ -7243,9 +7263,10 @@ impl App {
             self.handle_pdf_reload();
         }
 
+        let synctex_refreshed = self.refresh_stale_synctex();
         let synctex_applied = self.apply_pending_synctex_forward();
 
-        result.updated || synctex_applied
+        result.updated || synctex_applied || synctex_refreshed
     }
 
     #[cfg(feature = "pdf")]
@@ -7470,6 +7491,43 @@ impl App {
         }
 
         self.refresh_synctex_state(&doc_path, false);
+        self.synctex_stale_until = Self::synctex_older_than_pdf(&doc_path)
+            .then(|| std::time::Instant::now() + std::time::Duration::from_secs(10));
+    }
+
+    #[cfg(feature = "pdf")]
+    fn synctex_older_than_pdf(doc_path: &Path) -> bool {
+        let mtime = |p: &Path| std::fs::metadata(p).and_then(|m| m.modified()).ok();
+        let Some(pdf) = mtime(doc_path) else {
+            return false;
+        };
+        match crate::pdf::synctex::SyncTexScanner::find_synctex_file(doc_path)
+            .as_deref()
+            .and_then(mtime)
+        {
+            Some(sidecar) => sidecar < pdf,
+            None => true,
+        }
+    }
+
+    #[cfg(feature = "pdf")]
+    fn refresh_stale_synctex(&mut self) -> bool {
+        let Some(deadline) = self.synctex_stale_until else {
+            return false;
+        };
+        let Some(doc_path) = self.pdf_document_path.clone() else {
+            self.synctex_stale_until = None;
+            return false;
+        };
+        if Self::synctex_older_than_pdf(&doc_path) {
+            if std::time::Instant::now() >= deadline {
+                self.synctex_stale_until = None;
+            }
+            return false;
+        }
+        self.synctex_stale_until = None;
+        self.refresh_synctex_state(&doc_path, false);
+        true
     }
 
     #[cfg(not(feature = "pdf"))]
