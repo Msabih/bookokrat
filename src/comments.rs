@@ -16,6 +16,40 @@ pub struct PdfSelectionRect {
     pub bottomright_y: u32,
 }
 
+/// Link from a PDF annotation back to the LaTeX source that produced it
+/// (via SyncTeX). Used to re-anchor the annotation after the PDF is rebuilt.
+/// Stored under the optional `source:` key of a PDF comment entry, so older
+/// app versions simply ignore it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SourceAnchor {
+    /// Source file, relative to the project directory when it lives inside it.
+    pub file: String,
+    /// 1-based source line.
+    pub line: u32,
+    /// A few characters of page text right before the quote (disambiguation).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_before: Option<String>,
+    /// A few characters of page text right after the quote (disambiguation).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_after: Option<String>,
+    /// The quote could not be found after the last rebuild; the annotation
+    /// sits on the SyncTeX location (or where it was) instead.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub stale: bool,
+}
+
+/// A recomputed position for a PDF annotation (produced by re-anchoring).
+#[derive(Debug, Clone, PartialEq)]
+pub struct PdfRelocation {
+    pub id: String,
+    /// New target; `None` keeps the current one.
+    pub target: Option<CommentTarget>,
+    /// New anchor; `None` keeps the current one.
+    pub anchor: Option<SourceAnchor>,
+}
+
+const SOURCE_ANCHOR_KEY: &str = "source";
+
 /// Represents the specific sub-element within a block that a comment targets.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "subtarget_kind", rename_all = "snake_case")]
@@ -1032,6 +1066,26 @@ fn pdf_rects_overlap(a: &PdfSelectionRect, b: &PdfSelectionRect) -> bool {
         && b.topleft_y < a.bottomright_y
 }
 
+fn notes_markdown_item(location: &str, comment: &Comment, stale: bool) -> String {
+    let quote = comment
+        .quoted_text
+        .as_deref()
+        .map(|q| q.split_whitespace().collect::<Vec<_>>().join(" "))
+        .unwrap_or_default();
+    let body = match comment.highlight_color() {
+        Some(color) => format!("({} highlight)", color.label()),
+        None => comment.content.trim().to_string(),
+    };
+    let mut lines = body.lines();
+    let first = lines.next().unwrap_or_default();
+    let stale_mark = if stale { " _(stale: quote not found)_" } else { "" };
+    let mut item = format!("- {location} — \"{quote}\" → {first}{stale_mark}\n");
+    for line in lines {
+        item.push_str(&format!("  {line}\n"));
+    }
+    item
+}
+
 fn generate_comment_id() -> String {
     use rand::RngCore;
 
@@ -1050,10 +1104,33 @@ pub struct BookComments {
     /// so a save round-trip doesn't destroy comments written by a newer app
     /// version. Appended after the parseable entries on save.
     unparseable_entries: Vec<serde_yaml::Value>,
+    /// SyncTeX source anchors of PDF comments, keyed by comment id.
+    source_anchors: HashMap<String, SourceAnchor>,
+    /// The file is shared by several documents (a source-project sidecar
+    /// used by every PDF built from the same LaTeX root), possibly open in
+    /// several app instances: merge what is on disk before every save.
+    shared: bool,
+    /// Ids deleted in this session; never resurrected by the shared merge.
+    deleted_ids: std::collections::HashSet<String>,
+    /// Markdown digest regenerated next to a shared sidecar on every save.
+    notes_export_path: Option<PathBuf>,
+}
+
+/// Contents of one comments file.
+struct LoadedComments {
+    comments: Vec<Comment>,
+    unparseable: Vec<serde_yaml::Value>,
+    anchors: HashMap<String, SourceAnchor>,
 }
 
 impl BookComments {
     pub fn new(book_path: &Path, comments_dir: Option<&Path>) -> Result<Self> {
+        Self::new_with_path(Self::legacy_file_path(book_path, comments_dir)?)
+    }
+
+    /// Path of the per-book comments file in the comments directory
+    /// (`.bookokrat_comments/book_<md5>.yaml`).
+    pub fn legacy_file_path(book_path: &Path, comments_dir: Option<&Path>) -> Result<PathBuf> {
         let book_hash = Self::compute_book_hash(book_path);
         let resolved_dir = match comments_dir {
             Some(dir) => {
@@ -1064,8 +1141,93 @@ impl BookComments {
             }
             None => Self::get_comments_dir()?,
         };
-        let file_path = resolved_dir.join(format!("book_{book_hash}.yaml"));
-        Self::new_with_path(file_path)
+        Ok(resolved_dir.join(format!("book_{book_hash}.yaml")))
+    }
+
+    /// Open the comments sidecar shared by every PDF built from one LaTeX
+    /// source project (`<project>/.bookokrat/<root>.yaml`).
+    ///
+    /// All PDF comments in it are filed under `doc_id`. PDF comments from
+    /// `legacy_path` (the per-book file used before) are copied in once; the
+    /// legacy file itself is never modified. Imported legacy files are
+    /// recorded in `<root>.migrated` next to the sidecar so a comment deleted
+    /// later is not imported again.
+    pub fn open_source_sidecar(
+        sidecar_path: &Path,
+        doc_id: &str,
+        legacy_path: Option<&Path>,
+    ) -> Result<Self> {
+        if let Some(dir) = sidecar_path.parent() {
+            fs::create_dir_all(dir).with_context(|| {
+                format!("Failed to create comments directory {}", dir.display())
+            })?;
+        }
+        let mut book_comments = Self::new_with_path(sidecar_path.to_path_buf())?;
+        book_comments.shared = true;
+        book_comments.notes_export_path = Some(sidecar_path.with_extension("md"));
+
+        let mut changed = false;
+        for comment in &mut book_comments.comments {
+            if comment.is_pdf() && comment.chapter_href != doc_id {
+                comment.chapter_href = doc_id.to_string();
+                changed = true;
+            }
+        }
+
+        if let Some(legacy_path) = legacy_path {
+            changed |= book_comments.import_legacy_file(legacy_path, doc_id)?;
+        }
+
+        if changed {
+            book_comments.sort_comments();
+            book_comments.save_to_disk()?;
+        }
+        Ok(book_comments)
+    }
+
+    fn import_legacy_file(&mut self, legacy_path: &Path, doc_id: &str) -> Result<bool> {
+        let marker_path = self.file_path.with_extension("migrated");
+        let legacy_key = fs::canonicalize(legacy_path)
+            .unwrap_or_else(|_| legacy_path.to_path_buf())
+            .to_string_lossy()
+            .into_owned();
+        let already_imported = fs::read_to_string(&marker_path)
+            .map(|content| content.lines().any(|line| line == legacy_key))
+            .unwrap_or(false);
+        if already_imported || !legacy_path.exists() {
+            return Ok(false);
+        }
+
+        let legacy = Self::load_from_file(legacy_path)?;
+        let mut imported = 0usize;
+        for mut comment in legacy.comments {
+            if !comment.is_pdf() || self.comments_by_id.contains_key(&comment.id) {
+                continue;
+            }
+            comment.chapter_href = doc_id.to_string();
+            if let Some(anchor) = legacy.anchors.get(&comment.id) {
+                self.source_anchors
+                    .insert(comment.id.clone(), anchor.clone());
+            }
+            self.add_to_indices(&comment);
+            self.comments.push(comment);
+            imported += 1;
+        }
+
+        let mut marker = fs::read_to_string(&marker_path).unwrap_or_default();
+        if !marker.is_empty() && !marker.ends_with('\n') {
+            marker.push('\n');
+        }
+        marker.push_str(&legacy_key);
+        marker.push('\n');
+        fs::write(&marker_path, marker).context("Failed to write migration marker")?;
+
+        log::info!(
+            "Imported {imported} PDF comments from {} into {}",
+            legacy_path.display(),
+            self.file_path.display()
+        );
+        Ok(imported > 0)
     }
 
     /// Create an empty BookComments that doesn't load from or save to disk.
@@ -1077,25 +1239,30 @@ impl BookComments {
             comments_by_location: HashMap::new(),
             comments_by_id: HashMap::new(),
             unparseable_entries: Vec::new(),
+            source_anchors: HashMap::new(),
+            shared: false,
+            deleted_ids: std::collections::HashSet::new(),
+            notes_export_path: None,
         }
     }
 
     fn new_with_path(file_path: PathBuf) -> Result<Self> {
-        let (comments, unparseable_entries) = if file_path.exists() {
+        let loaded = if file_path.exists() {
             Self::load_from_file(&file_path)?
         } else {
-            (Vec::new(), Vec::new())
+            LoadedComments {
+                comments: Vec::new(),
+                unparseable: Vec::new(),
+                anchors: HashMap::new(),
+            }
         };
 
-        let mut book_comments = Self {
-            file_path,
-            comments: Vec::new(),
-            comments_by_location: HashMap::new(),
-            comments_by_id: HashMap::new(),
-            unparseable_entries,
-        };
+        let mut book_comments = Self::new_empty();
+        book_comments.file_path = file_path;
+        book_comments.unparseable_entries = loaded.unparseable;
+        book_comments.source_anchors = loaded.anchors;
 
-        for comment in comments {
+        for comment in loaded.comments {
             book_comments.add_to_indices(&comment);
             book_comments.comments.push(comment);
         }
@@ -1103,10 +1270,26 @@ impl BookComments {
         Ok(book_comments)
     }
 
+    /// Whether this is a source-project sidecar shared between documents.
+    pub fn is_shared(&self) -> bool {
+        self.shared
+    }
+
     pub fn add_comment(&mut self, comment: Comment) -> Result<()> {
+        self.add_comment_with_anchor(comment, None)
+    }
+
+    pub fn add_comment_with_anchor(
+        &mut self,
+        comment: Comment,
+        anchor: Option<SourceAnchor>,
+    ) -> Result<()> {
         let mut comment = comment;
         if self.comments_by_id.contains_key(&comment.id) {
             comment.id = generate_comment_id();
+        }
+        if let Some(anchor) = anchor {
+            self.source_anchors.insert(comment.id.clone(), anchor);
         }
 
         self.add_to_indices(&comment);
@@ -1114,6 +1297,110 @@ impl BookComments {
 
         self.sort_comments();
         self.save_to_disk()
+    }
+
+    pub fn source_anchor(&self, comment_id: &str) -> Option<&SourceAnchor> {
+        self.source_anchors.get(comment_id)
+    }
+
+    /// Apply re-anchoring results. Unknown ids (deleted meanwhile) are
+    /// skipped. Saves only when something actually changed.
+    pub fn apply_pdf_relocations(&mut self, relocations: Vec<PdfRelocation>) -> Result<bool> {
+        let mut changed = false;
+        for relocation in relocations {
+            let Some(idx) = self.find_comment_index_by_id(&relocation.id) else {
+                continue;
+            };
+            if !self.comments[idx].is_pdf() {
+                continue;
+            }
+            if let Some(target) = relocation.target {
+                if self.comments[idx].target != target {
+                    self.comments[idx].target = target;
+                    changed = true;
+                }
+            }
+            if let Some(anchor) = relocation.anchor {
+                if self.source_anchors.get(&relocation.id) != Some(&anchor) {
+                    self.source_anchors.insert(relocation.id, anchor);
+                    changed = true;
+                }
+            }
+        }
+        if changed {
+            self.sort_comments();
+            self.save_to_disk()?;
+        }
+        Ok(changed)
+    }
+
+    /// For shared sidecars: pull in comments another app instance added or
+    /// edited since this file was loaded. Returns true if anything changed.
+    pub fn reload_external_changes(&mut self) -> bool {
+        let changed = self.merge_from_disk();
+        if changed {
+            self.sort_comments();
+        }
+        changed
+    }
+
+    fn merge_from_disk(&mut self) -> bool {
+        if !self.shared || !self.file_path.exists() {
+            return false;
+        }
+        let disk = match Self::load_from_file(&self.file_path) {
+            Ok(disk) => disk,
+            Err(e) => {
+                log::warn!(
+                    "Failed to re-read shared comments file {}: {e}",
+                    self.file_path.display()
+                );
+                return false;
+            }
+        };
+
+        let mut changed = false;
+        for disk_comment in disk.comments {
+            if self.deleted_ids.contains(&disk_comment.id) {
+                continue;
+            }
+            match self.comments_by_id.get(&disk_comment.id).copied() {
+                Some(idx) => {
+                    let local = &mut self.comments[idx];
+                    if disk_comment.updated_at > local.updated_at {
+                        local.content = disk_comment.content;
+                        local.body = disk_comment.body;
+                        local.updated_at = disk_comment.updated_at;
+                        changed = true;
+                    }
+                }
+                None => {
+                    // Entries written without an id get a fresh random id on
+                    // every load; recognise them by their full payload.
+                    let duplicate = self.comments.iter().any(|local| {
+                        local.matches_location(&disk_comment.chapter_href, &disk_comment.target)
+                            && local.content == disk_comment.content
+                            && local.updated_at == disk_comment.updated_at
+                    });
+                    if duplicate {
+                        continue;
+                    }
+                    if let Some(anchor) = disk.anchors.get(&disk_comment.id) {
+                        self.source_anchors
+                            .insert(disk_comment.id.clone(), anchor.clone());
+                    }
+                    self.add_to_indices(&disk_comment);
+                    self.comments.push(disk_comment);
+                    changed = true;
+                }
+            }
+        }
+        for value in disk.unparseable {
+            if !self.unparseable_entries.contains(&value) {
+                self.unparseable_entries.push(value);
+            }
+        }
+        changed
     }
 
     pub fn update_comment_by_id(&mut self, comment_id: &str, new_content: String) -> Result<()> {
@@ -1150,7 +1437,9 @@ impl BookComments {
             .find_comment_index(chapter_href, target)
             .context("Comment not found")?;
 
-        let _comment = self.comments.remove(idx);
+        let comment = self.comments.remove(idx);
+        self.source_anchors.remove(&comment.id);
+        self.deleted_ids.insert(comment.id);
 
         self.rebuild_indices();
 
@@ -1166,6 +1455,8 @@ impl BookComments {
             return Ok(());
         };
         self.comments.remove(idx);
+        self.source_anchors.remove(comment_id);
+        self.deleted_ids.insert(comment_id.to_string());
         self.rebuild_indices();
         self.save_to_disk()
     }
@@ -1320,11 +1611,16 @@ impl BookComments {
     /// entries are kept in raw form so `save_to_disk` can write them back —
     /// otherwise an older app version round-tripping a newer file would
     /// silently destroy comments it didn't recognise.
-    fn load_from_file(file_path: &Path) -> Result<(Vec<Comment>, Vec<serde_yaml::Value>)> {
+    fn load_from_file(file_path: &Path) -> Result<LoadedComments> {
         let content = fs::read_to_string(file_path).context("Failed to read comments file")?;
 
+        let mut anchors: HashMap<String, SourceAnchor> = HashMap::new();
         if content.trim().is_empty() {
-            return Ok((Vec::new(), Vec::new()));
+            return Ok(LoadedComments {
+                comments: Vec::new(),
+                unparseable: Vec::new(),
+                anchors,
+            });
         }
 
         let raw: Vec<serde_yaml::Value> =
@@ -1346,8 +1642,26 @@ impl BookComments {
                     .and_then(|v| v.as_str())
                     .map(String::from)
             });
+            let anchor = value.as_mapping().and_then(|m| {
+                let raw = m.get(serde_yaml::Value::String(SOURCE_ANCHOR_KEY.to_string()))?;
+                match serde_yaml::from_value::<SourceAnchor>(raw.clone()) {
+                    Ok(anchor) => Some(anchor),
+                    Err(e) => {
+                        log::warn!(
+                            "Ignoring malformed source anchor at index {idx} in {}: {e}",
+                            file_path.display()
+                        );
+                        None
+                    }
+                }
+            });
             match serde_yaml::from_value::<Comment>(value.clone()) {
-                Ok(comment) => items.push((comment, group_id)),
+                Ok(comment) => {
+                    if let Some(anchor) = anchor.filter(|_| comment.is_pdf()) {
+                        anchors.insert(comment.id.clone(), anchor);
+                    }
+                    items.push((comment, group_id))
+                }
                 Err(e) => {
                     log::warn!(
                         "Preserving unparseable comment at index {idx} in {} across save round-trip: {e}",
@@ -1361,13 +1675,21 @@ impl BookComments {
         // by a shared `group_id`. The new model represents them as one
         // multi-slice Comment, so we eagerly merge them here.
         let comments = merge_legacy_groups(items);
-        Ok((comments, unparseable))
+        Ok(LoadedComments {
+            comments,
+            unparseable,
+            anchors,
+        })
     }
 
-    fn save_to_disk(&self) -> Result<()> {
+    fn save_to_disk(&mut self) -> Result<()> {
         // Skip saving if file_path is empty (test mode)
         if self.file_path.as_os_str().is_empty() {
             return Ok(());
+        }
+
+        if self.merge_from_disk() {
+            self.sort_comments();
         }
 
         // Preserve unparseable entries (written by newer app versions or
@@ -1377,7 +1699,18 @@ impl BookComments {
         let mut all: Vec<serde_yaml::Value> =
             Vec::with_capacity(self.comments.len() + self.unparseable_entries.len());
         for comment in &self.comments {
-            all.push(serde_yaml::to_value(comment).context("Failed to serialize a comment")?);
+            let mut value =
+                serde_yaml::to_value(comment).context("Failed to serialize a comment")?;
+            if let (Some(anchor), Some(mapping)) = (
+                self.source_anchors.get(&comment.id),
+                value.as_mapping_mut(),
+            ) {
+                mapping.insert(
+                    serde_yaml::Value::String(SOURCE_ANCHOR_KEY.to_string()),
+                    serde_yaml::to_value(anchor).context("Failed to serialize a source anchor")?,
+                );
+            }
+            all.push(value);
         }
         all.extend(self.unparseable_entries.iter().cloned());
 
@@ -1385,7 +1718,65 @@ impl BookComments {
 
         fs::write(&self.file_path, yaml).context("Failed to write comments file")?;
 
+        if let Some(notes_path) = self.notes_export_path.as_ref() {
+            if let Err(e) = fs::write(notes_path, self.source_notes_markdown()) {
+                log::warn!("Failed to write notes digest {}: {e}", notes_path.display());
+            }
+        }
+
         Ok(())
+    }
+
+    /// Markdown digest of all PDF annotations, grouped by LaTeX source file:
+    /// `file:line — "quote" → comment`. Meant to be handed to an AI
+    /// assistant (or a human) working on the sources.
+    pub fn source_notes_markdown(&self) -> String {
+        let title = self
+            .file_path
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let mut out = format!(
+            "# Notes on {title}\n\n<!-- Generated by bookokrat from {}; edits here are overwritten. -->\n",
+            self.file_path
+                .file_name()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_default()
+        );
+
+        let mut anchored: Vec<(&SourceAnchor, &Comment)> = Vec::new();
+        let mut unanchored: Vec<&Comment> = Vec::new();
+        for comment in self.comments.iter().filter(|c| c.is_pdf()) {
+            match self.source_anchors.get(&comment.id) {
+                Some(anchor) => anchored.push((anchor, comment)),
+                None => unanchored.push(comment),
+            }
+        }
+        anchored.sort_by(|(a, ca), (b, cb)| {
+            a.file
+                .cmp(&b.file)
+                .then(a.line.cmp(&b.line))
+                .then(ca.target.secondary_sort_key().cmp(&cb.target.secondary_sort_key()))
+        });
+
+        let mut current_file: Option<&str> = None;
+        for (anchor, comment) in &anchored {
+            if current_file != Some(anchor.file.as_str()) {
+                out.push_str(&format!("\n## {}\n\n", anchor.file));
+                current_file = Some(anchor.file.as_str());
+            }
+            let location = format!("{}:{}", anchor.file, anchor.line);
+            out.push_str(&notes_markdown_item(&location, comment, anchor.stale));
+        }
+
+        if !unanchored.is_empty() {
+            out.push_str("\n## Without source location\n\n");
+            for comment in unanchored {
+                let location = format!("page {}", comment.page().unwrap_or(0) + 1);
+                out.push_str(&notes_markdown_item(&location, comment, false));
+            }
+        }
+        out
     }
 
     fn find_comment_index(&self, chapter_href: &str, target: &CommentTarget) -> Option<usize> {
