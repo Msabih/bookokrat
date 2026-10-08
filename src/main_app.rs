@@ -7839,7 +7839,13 @@ impl App {
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_else(|| editor_file.clone());
 
-        if let Some(editor_cmd) = self.settings.load().synctex_editor.clone() {
+        // Without a configured editor, hand the jump to FlashTex's nvim bridge
+        // when it is installed.
+        let editor_cmd = self.settings.load().synctex_editor.clone().or_else(|| {
+            crate::voice::recorder::find_in_path("flashtex-goto")
+                .map(|p| format!("'{}' '{{file}}' {{line}}", p.display()))
+        });
+        if let Some(editor_cmd) = editor_cmd {
             let cmd = editor_cmd
                 .replace("{file}", &editor_file)
                 .replace("{line}", &line.to_string())
