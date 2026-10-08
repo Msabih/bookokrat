@@ -6431,10 +6431,41 @@ impl PdfReaderState {
         }
 
         if !self.normal_mode.active {
-            return None;
+            // Plain reading mode: what is in the middle of the screen.
+            let (page, line_idx) = self.middle_visible_line()?;
+            return self.synctex_inverse_anchor_from_cursor(crate::pdf::CursorPosition {
+                page,
+                line_idx,
+                char_idx: 0,
+            });
         }
 
         self.synctex_inverse_anchor_from_cursor(self.normal_mode.cursor)
+    }
+
+    /// The text line in the middle of the visible area, falling back to the
+    /// first text line of the current page.
+    fn middle_visible_line(&self) -> Option<(usize, usize)> {
+        let mut visible = Vec::new();
+        for page in self.page.saturating_sub(1)..=self.page + 1 {
+            let Some(rendered) = self.rendered.get(page) else {
+                continue;
+            };
+            for (idx, line) in rendered.line_bounds.iter().enumerate() {
+                if !line.chars.is_empty() && self.is_position_visible(page, idx) {
+                    visible.push((page, idx));
+                }
+            }
+        }
+        if let Some(&middle) = visible.get(visible.len() / 2) {
+            return Some(middle);
+        }
+        let rendered = self.rendered.get(self.page)?;
+        let idx = rendered
+            .line_bounds
+            .iter()
+            .position(|line| !line.chars.is_empty())?;
+        Some((self.page, idx))
     }
 
     /// Handle `gd` in normal mode for SyncTeX inverse search.
