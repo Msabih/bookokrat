@@ -39,6 +39,7 @@ pub mod system_command;
 pub mod terminal;
 pub mod terminal_overlay;
 pub use components::table;
+pub mod rtl_text;
 pub mod theme;
 pub mod types;
 pub mod voice;

@@ -89,6 +89,11 @@ pub struct TableOfContents {
     manual_navigation: bool,          // True when user is manually navigating TOC
     manual_navigation_cooldown: u8,   // Grace period counter after manual navigation
     search_state: SearchState,
+    /// The book's titles are mainly right-to-left (Urdu, Arabic, ...): the TOC
+    /// is drawn right-aligned and nested from the right.
+    rtl: bool,
+    /// Titles shaped and reordered for display, per book (shaping is not free).
+    rtl_titles: std::cell::RefCell<HashMap<String, String>>,
 }
 
 impl TableOfContents {
@@ -106,11 +111,78 @@ impl TableOfContents {
             manual_navigation: false,
             manual_navigation_cooldown: 0,
             search_state: SearchState::new(),
+            rtl: false,
+            rtl_titles: std::cell::RefCell::new(HashMap::new()),
         }
     }
 
     pub fn set_current_book_info(&mut self, book_info: CurrentBookInfo) {
         self.current_book_info = Some(book_info);
+        self.refresh_direction();
+    }
+
+    pub fn is_rtl(&self) -> bool {
+        self.rtl
+    }
+
+    fn refresh_direction(&mut self) {
+        fn titles<'a>(items: &'a [TocItem], out: &mut Vec<&'a str>) {
+            for item in items {
+                out.push(item.title());
+                if let TocItem::Section { children, .. } = item {
+                    titles(children, out);
+                }
+            }
+        }
+        let mut all = Vec::new();
+        if let Some(info) = self.current_book_info.as_ref() {
+            titles(&info.toc_items, &mut all);
+        }
+        let rtl =
+            crate::rtl_text::detect_direction(all.iter().copied()).is_some_and(|d| d.is_rtl());
+        if rtl != self.rtl {
+            log::info!("TOC direction: {}", if rtl { "rtl" } else { "ltr" });
+        }
+        self.rtl = rtl;
+        self.rtl_titles.borrow_mut().clear();
+    }
+
+    /// One right-to-left TOC row, `width` cells wide: the shaped title
+    /// right-aligned, followed (to its right) by `lead` (fold icon / marker,
+    /// already mirrored) and the nesting indent. Titles too long for the row
+    /// keep their beginning (the right end) and are elided on the left.
+    fn rtl_row(&self, title: &str, lead: &str, indent_level: usize, width: usize) -> String {
+        use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+        let body = self
+            .rtl_titles
+            .borrow_mut()
+            .entry(title.to_string())
+            .or_insert_with(|| {
+                crate::rtl_text::VisualText::shaped(title, crate::rtl_text::TextDirection::Rtl)
+                    .text()
+            })
+            .clone();
+        let tail = format!("{lead}{}", "  ".repeat(indent_level + 1));
+        let avail = width.saturating_sub(tail.width());
+        let mut body = body;
+        if body.width() > avail {
+            let mut kept: Vec<char> = Vec::new();
+            let mut used = 1; // the ellipsis
+            for c in body.chars().rev() {
+                let w = c.width().unwrap_or(0);
+                if used + w > avail {
+                    break;
+                }
+                used += w;
+                kept.push(c);
+            }
+            kept.reverse();
+            body = std::iter::once('…').chain(kept).collect();
+        }
+        format!(
+            "{}{body}{tail}",
+            " ".repeat(avail.saturating_sub(body.width()))
+        )
     }
 
     /// Update book info while preserving expansion states from existing ToC items
@@ -122,6 +194,7 @@ impl TableOfContents {
             }
         }
         self.current_book_info = Some(new_book_info);
+        self.refresh_direction();
     }
 
     /// Update only navigation-related fields without touching ToC structure
@@ -1024,6 +1097,7 @@ impl TableOfContents {
             0,
             &mut toc_item_index,
             selected_index,
+            area.width.saturating_sub(2) as usize,
         );
         let title = if is_focused {
             format!("{book_display_name} - Book • ")
@@ -1059,6 +1133,7 @@ impl TableOfContents {
         indent_level: usize,
         toc_item_index: &mut usize,
         selected_index: Option<usize>,
+        width: usize,
     ) {
         let is_focused = selected_index.is_some();
         let (text_color, _border_color, _bg_color) = palette.get_panel_colors(is_focused);
@@ -1076,10 +1151,16 @@ impl TableOfContents {
 
                     let indent = "  ".repeat(indent_level + 1);
                     let marker = if should_highlight { "* " } else { "" };
-                    let full_text = format!("{indent}{marker}{title}");
+                    let full_text = if self.rtl {
+                        let lead = if should_highlight { " *" } else { "" };
+                        self.rtl_row(title, lead, indent_level, width)
+                    } else {
+                        format!("{indent}{marker}{title}")
+                    };
 
                     // Check if this item matches search
-                    let mut chapter_content = if self.search_state.active
+                    let mut chapter_content = if !self.rtl
+                        && self.search_state.active
                         && self.search_state.is_match(*toc_item_index)
                     {
                         self.create_highlighted_line_with_indent(
@@ -1119,10 +1200,17 @@ impl TableOfContents {
 
                     let indent = "  ".repeat(indent_level + 1);
                     let marker = if should_highlight { "* " } else { "" };
-                    let full_text = format!("{indent}{marker}{section_icon} {title}");
+                    let full_text = if self.rtl {
+                        let icon = if *is_expanded { "⌄" } else { "‹" };
+                        let star = if should_highlight { " *" } else { "" };
+                        self.rtl_row(title, &format!(" {icon}{star}"), indent_level, width)
+                    } else {
+                        format!("{indent}{marker}{section_icon} {title}")
+                    };
 
                     // Check if this item matches search
-                    let mut section_content = if self.search_state.active
+                    let mut section_content = if !self.rtl
+                        && self.search_state.active
                         && self.search_state.is_match(*toc_item_index)
                     {
                         self.create_highlighted_line_with_indent(
@@ -1155,6 +1243,7 @@ impl TableOfContents {
                             indent_level + 1,
                             toc_item_index,
                             selected_index,
+                            width,
                         );
                     }
 
@@ -1698,5 +1787,37 @@ mod tests {
         toc.update_current_book_info_preserve_state(new_book_info);
 
         assert_eq!(toc.collect_expansion_state(), Vec::new());
+    }
+
+    #[test]
+    fn urdu_titles_make_the_toc_rtl() {
+        let toc = make_toc_with(vec![
+            chapter("پہلا باب: ابن تیمیہ کا فکری ارتقا"),
+            chapter("دوسرا باب"),
+        ]);
+        assert!(toc.is_rtl());
+        let toc = make_toc_with(vec![chapter("Introduction"), chapter("Chapter Two")]);
+        assert!(!toc.is_rtl());
+    }
+
+    #[test]
+    fn rtl_rows_are_right_aligned_and_keep_their_beginning() {
+        use unicode_width::UnicodeWidthStr;
+        let toc = make_toc_with(vec![chapter("دوسرا باب")]);
+        let row = toc.rtl_row("دوسرا باب", " *", 1, 30);
+        assert_eq!(row.width(), 30);
+        assert!(row.starts_with("   "), "padding goes on the left: {row:?}");
+        assert!(
+            row.ends_with(" *    "),
+            "marker and indent on the right: {row:?}"
+        );
+
+        let long = "یہ ایک بہت طویل عنوان ہے جو پینل میں نہیں سماتا";
+        let row = toc.rtl_row(long, "", 0, 20);
+        assert_eq!(row.width(), 20);
+        assert!(
+            row.starts_with('…'),
+            "elided on the left (the title's end): {row:?}"
+        );
     }
 }

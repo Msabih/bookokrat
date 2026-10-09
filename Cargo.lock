@@ -148,6 +148,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b0674a1ddeecb70197781e945de4b3b8ffb61fa939a5597bcf48503737663100"
 
 [[package]]
+name = "ar-reshaper"
+version = "1.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "08dae85b57b725df143d5a2eb92c032dd032f062a636826fda1e1a4b21c40c03"
+
+[[package]]
 name = "arbitrary"
 version = "1.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -352,6 +358,7 @@ dependencies = [
  "anstyle",
  "anstyle-svg",
  "anyhow",
+ "ar-reshaper",
  "arboard",
  "base64",
  "base64-simd",
@@ -398,6 +405,7 @@ dependencies = [
  "textwrap",
  "thiserror 1.0.69",
  "toml 0.9.5",
+ "unicode-bidi",
  "unicode-width 0.2.0",
  "vt100",
  "walkdir",
