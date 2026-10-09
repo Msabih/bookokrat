@@ -530,7 +530,7 @@ impl PdfReaderState {
             toc_entries: Vec::new(),
             comments_enabled,
             invert_images: true,
-            themed_rendering: true,
+            themed_rendering: false,
             show_link_underlines: settings.load().pdf_show_link_underlines,
             zen_mode: false,
             supports_comments,

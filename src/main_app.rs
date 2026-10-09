@@ -7797,7 +7797,13 @@ impl App {
                     .file_name()
                     .map(|n| n.to_string_lossy().to_string())
                     .unwrap_or_else(|| file.clone());
-                match scanner.forward_search(&file, line, column) {
+                // Not every source line has a SyncTeX record (blank lines,
+                // comments, lines inside macro arguments): take the nearest one.
+                let found = std::iter::once(0i64)
+                    .chain((1..=30).flat_map(|d| [-d, d]))
+                    .filter_map(|d| u32::try_from(i64::from(line) + d).ok().filter(|l| *l > 0))
+                    .find_map(|l| scanner.forward_search(&file, l, column));
+                match found {
                     Some(result) => {
                         // SyncTeX pages are 1-indexed, internal pages are 0-indexed
                         let page_0 = result.page.saturating_sub(1);

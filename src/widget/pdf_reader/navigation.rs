@@ -4448,15 +4448,56 @@ impl PdfReaderState {
             pdf_y: (pdf_y_pts * f64::from(scale_factor)) as f32,
             ..Default::default()
         };
-        let Some(cursor) = self.selection_point_to_cursor(point) else {
-            return false;
+        // The SyncTeX point can fall between lines (spacing, figures): then
+        // the nearest text line on the page.
+        let Some(cursor) = self
+            .selection_point_to_cursor(point)
+            .or_else(|| self.nearest_line_cursor(page, point.pdf_x, point.pdf_y))
+        else {
+            // A page without text: being on the page is all there is.
+            return true;
         };
 
+        if self.normal_mode.active {
+            // In cursor mode the cursor goes there, like a jump in vim;
+            // restoring it would scroll the view straight back.
+            self.normal_mode.cursor = cursor;
+            let _ = self.ensure_cursor_visible();
+            return true;
+        }
         let previous_cursor = self.normal_mode.cursor;
         self.normal_mode.cursor = cursor;
         let _ = self.ensure_cursor_visible();
         self.normal_mode.cursor = previous_cursor;
         true
+    }
+
+    fn nearest_line_cursor(
+        &self,
+        page: usize,
+        pdf_x: f32,
+        pdf_y: f32,
+    ) -> Option<crate::pdf::CursorPosition> {
+        let lines = &self.rendered.get(page)?.line_bounds;
+        let (line_idx, line) = lines
+            .iter()
+            .enumerate()
+            .filter(|(_, l)| !l.chars.is_empty())
+            .min_by(|(_, a), (_, b)| {
+                let da = (pdf_y - (a.y0 + a.y1) / 2.0).abs();
+                let db = (pdf_y - (b.y0 + b.y1) / 2.0).abs();
+                da.total_cmp(&db)
+            })?;
+        let char_idx = line
+            .chars
+            .iter()
+            .position(|c| c.x >= pdf_x)
+            .unwrap_or(line.chars.len() - 1);
+        Some(crate::pdf::CursorPosition {
+            page,
+            line_idx,
+            char_idx,
+        })
     }
 
     fn find_word_bounds_at(&self, point: &crate::pdf::SelectionPoint) -> Option<(f32, f32)> {
